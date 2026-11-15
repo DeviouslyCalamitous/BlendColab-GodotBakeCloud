@@ -1,0 +1,1 @@
+"""BlendColab / GodotBakeCloud distributed worker package."""
