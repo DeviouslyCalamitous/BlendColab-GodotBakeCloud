@@ -223,7 +223,7 @@ def install_cached_binary(
         local_tmp = Path("/tmp") / archive_name
         _download_with_progress(url, local_tmp)
         log.info("Caching archive to Google Drive: %s", cached_archive)
-        shutil.copy2(local_tmp, cached_archive)
+        shutil.copyfile(local_tmp, cached_archive)
         local_tmp.unlink(missing_ok=True)
     else:
         log.info("Cache hit on Google Drive: %s", cached_archive.name)
