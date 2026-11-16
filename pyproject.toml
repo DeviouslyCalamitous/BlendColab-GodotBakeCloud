@@ -1,29 +1,23 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "blendcolab-godotbakecloud"
-version = "1.0.0"
-description = "Distributed free cloud GPU render farm for Blender Cycles and Godot 4 LightmapGI."
+version = "0.2.0"
+description = "Distributed Cloud GPU Render & Lightmap Bake Farm for Blender 3.6-5.3 and Godot 4"
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
-dependencies = [
-    "Pillow>=10.0.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
-    "pytest>=8.0.0",
-    "ruff>=0.6.0",
+    "pytest>=8.0",
 ]
+
+[tool.setuptools.packages.find]
+include = ["scripts*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-v"
-
-[tool.ruff]
-line-length = 100
-target-version = "py310"
-exclude = ["notebooks"]
-
-[tool.ruff.lint]
-select = ["E", "F", "I", "W"]
-ignore = ["E501"]
+pythonpath = ["scripts"]
