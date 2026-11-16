@@ -1,13 +1,13 @@
 """
 Injected Blender startup script (`blender -b scene.blend -P blender_gpu_setup.py -- ...`).
 
+Compatible across Blender 3.6 LTS, 4.0–4.5 LTS, and 5.0–5.3.
 Auto-detects NVIDIA GPU architecture (Turing/Ampere+ vs Pascal P100), selects OPTIX
-when RT cores are present with automatic fallback to CUDA, activates OpenImageDenoise,
-and applies CLI sample/multi-GPU overrides.
+when RT cores are present with automatic fallback to CUDA, activates OpenImageDenoise
+(including GPU denoising on Blender 4.1+), and applies CLI sample/multi-GPU overrides.
 """
 
 import argparse
-import os
 import subprocess
 import sys
 import bpy
@@ -46,6 +46,9 @@ def detect_preferred_backend() -> str:
 
 
 def configure_cycles(samples: int | None, pool_gpus: bool) -> None:
+    version_str = getattr(bpy.app, "version_string", "unknown")
+    print(f"[BlendColab] Configuring Cycles on Blender {version_str}")
+
     scene = bpy.context.scene
     scene.render.engine = "CYCLES"
     scene.cycles.device = "GPU"
@@ -65,7 +68,6 @@ def configure_cycles(samples: int | None, pool_gpus: bool) -> None:
             if not gpu_devices:
                 continue
 
-            # Enable all visible GPUs (CUDA_VISIBLE_DEVICES isolates per-GPU workers unless --pool-gpus)
             for dev in cycles_prefs.devices:
                 if dev.type == backend:
                     dev.use = True
@@ -82,13 +84,20 @@ def configure_cycles(samples: int | None, pool_gpus: bool) -> None:
         print("[BlendColab] WARNING: No GPU backend available; falling back to CPU rendering.")
         scene.cycles.device = "CPU"
 
-    # Configure Denoising cleanly for both T4 and P100
+    # Configure OpenImageDenoise across Blender 3.6 LTS, 4.x, and 5.x
     scene.cycles.use_denoising = True
     try:
         scene.cycles.denoiser = "OPENIMAGEDENOISE"
         scene.cycles.denoising_input_passes = "RGB_ALBEDO_NORMAL"
     except Exception:
         pass
+
+    # Enable GPU-accelerated OIDN when running on Blender 4.1+
+    if hasattr(scene.cycles, "denoising_use_gpu"):
+        try:
+            scene.cycles.denoising_use_gpu = activated_backend is not None
+        except Exception:
+            pass
 
     # Keep scene BVH in VRAM across frames if memory allows
     scene.render.use_persistent_data = True

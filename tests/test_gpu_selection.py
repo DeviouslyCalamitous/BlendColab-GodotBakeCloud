@@ -1,6 +1,6 @@
 """
 Tests GPU architecture detection (T4 Turing vs. P100 Pascal), CUDA_VISIBLE_DEVICES
-pinning for Kaggle T4 x2 setups, and Blender backend routing.
+pinning for Kaggle T4 x2 setups, Blender backend routing, and Blender 3.6–5.3 version URLs.
 """
 
 from __future__ import annotations
@@ -9,12 +9,15 @@ from pathlib import Path
 import sys
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 # Mock Blender's internal `bpy` module so `blender_gpu_setup` can be tested in standard CI
 sys.modules.setdefault("bpy", MagicMock())
 
 import blender_gpu_setup  # noqa: E402
+from env_bootstrap import BLENDER_VERSIONS, resolve_blender_url  # noqa: E402
 from render_worker import GPUDevice, query_gpus  # noqa: E402
 
 
@@ -53,3 +56,23 @@ def test_blender_backend_prefers_optix_on_t4_and_cuda_on_p100() -> None:
 
     with patch("subprocess.check_output", return_value="6.0, Tesla P100-PCIE-16GB\n"):
         assert blender_gpu_setup.detect_preferred_backend() == "CUDA"
+
+
+def test_all_blender_versions_resolve_cleanly() -> None:
+    assert len(BLENDER_VERSIONS) == 11
+    for label, expected_url in BLENDER_VERSIONS.items():
+        tag, url = resolve_blender_url(label)
+        assert url == expected_url
+        assert tag in url
+
+    # Also verify short version aliases work
+    tag_36, url_36 = resolve_blender_url("3.6")
+    assert tag_36 == "3.6.23"
+    assert "Blender3.6" in url_36
+
+    tag_53, url_53 = resolve_blender_url("5.3")
+    assert tag_53 == "5.3.0"
+    assert "Blender5.3" in url_53
+
+    with pytest.raises(ValueError):
+        resolve_blender_url("2.79")

@@ -2,12 +2,9 @@
 """
 BlendColab / GodotBakeCloud — Cloud Environment Bootstrapper & Drive Binary Cache.
 
-Responsibilities:
-1. Detects Google Colab vs. Kaggle runtime environments.
-2. Mounts Google Drive (native FUSE on Colab; rclone FUSE daemon via Kaggle Secrets on Kaggle).
-3. Installs missing Linux system dependencies (xvfb, libvulkan1, ffmpeg, rclone).
-4. Downloads and caches Blender LTS & Godot 4 binaries on Google Drive so subsequent
-   cloud sessions extract directly to fast local NVMe storage in under 15 seconds.
+Supports selecting any official Blender release from 3.6 LTS through 5.3, caches
+archives on Google Drive for <15s warm boots, mounts Drive on Colab/Kaggle, and
+installs required headless Linux graphics libraries.
 """
 
 from __future__ import annotations
@@ -30,14 +27,49 @@ logging.basicConfig(
 )
 log = logging.getLogger("EnvBootstrap")
 
-# Official LTS / Stable release defaults (override via CLI flags if needed)
-DEFAULT_BLENDER_URL = (
-    "https://download.blender.org/release/Blender4.2/blender-4.2.4-linux-x64.tar.xz"
-)
+# Verified official Linux x64 release tarballs (Blender 3.6 LTS -> 5.3)
+BLENDER_VERSIONS: dict[str, str] = {
+    "3.6 LTS (3.6.23)": "https://download.blender.org/release/Blender3.6/blender-3.6.23-linux-x64.tar.xz",
+    "4.0 (4.0.2)": "https://download.blender.org/release/Blender4.0/blender-4.0.2-linux-x64.tar.xz",
+    "4.1 (4.1.1)": "https://download.blender.org/release/Blender4.1/blender-4.1.1-linux-x64.tar.xz",
+    "4.2 LTS (4.2.8)": "https://download.blender.org/release/Blender4.2/blender-4.2.8-linux-x64.tar.xz",
+    "4.3 (4.3.2)": "https://download.blender.org/release/Blender4.3/blender-4.3.2-linux-x64.tar.xz",
+    "4.4 (4.4.3)": "https://download.blender.org/release/Blender4.4/blender-4.4.3-linux-x64.tar.xz",
+    "4.5 LTS (4.5.14)": "https://download.blender.org/release/Blender4.5/blender-4.5.14-linux-x64.tar.xz",
+    "5.0 (5.0.1)": "https://download.blender.org/release/Blender5.0/blender-5.0.1-linux-x64.tar.xz",
+    "5.1 (5.1.2)": "https://download.blender.org/release/Blender5.1/blender-5.1.2-linux-x64.tar.xz",
+    "5.2 LTS (5.2.3)": "https://download.blender.org/release/Blender5.2/blender-5.2.3-linux-x64.tar.xz",
+    "5.3 (5.3.0)": "https://download.blender.org/release/Blender5.3/blender-5.3.0-linux-x64.tar.xz",
+}
+
+DEFAULT_BLENDER_VERSION = "5.2 LTS (5.2.3)"
 DEFAULT_GODOT_URL = (
     "https://github.com/godotengine/godot/releases/download/4.3-stable/"
     "Godot_v4.3-stable_linux.x86_64.zip"
 )
+
+
+def resolve_blender_url(version_spec: str) -> tuple[str, str]:
+    """
+    Resolves a dropdown label (e.g. '5.2 LTS (5.2.3)') or short version ('5.2', '3.6.23')
+    into `(version_tag, download_url)`.
+    """
+    spec = version_spec.strip()
+    if spec in BLENDER_VERSIONS:
+        url = BLENDER_VERSIONS[spec]
+        tag = url.split("blender-")[1].split("-linux")[0]
+        return tag, url
+
+    # Match short prefixes like "3.6", "4.5", "5.3", or exact patch "4.2.8"
+    for label, url in BLENDER_VERSIONS.items():
+        if label.startswith(spec) or f"({spec})" in label:
+            tag = url.split("blender-")[1].split("-linux")[0]
+            return tag, url
+
+    raise ValueError(
+        f"Unsupported Blender version '{version_spec}'. "
+        f"Choose from: {', '.join(BLENDER_VERSIONS.keys())}"
+    )
 
 
 def detect_platform() -> str:
@@ -64,7 +96,7 @@ def get_local_tools_dir(platform: str) -> Path:
 def mount_google_drive(platform: str, mount_point: Path) -> Path:
     """
     Mounts Google Drive and returns the root `MyDrive` path.
-    - Colab: Uses `google.colab.drive.mount`
+    - Colab: Uses `google.colab.drive.mount` (if not already mounted by notebook cell)
     - Kaggle: Reads `RCLONE_CONF` from Kaggle Secrets (or env) and starts `rclone mount`
     """
     if platform == "colab":
@@ -121,7 +153,6 @@ def mount_google_drive(platform: str, mount_point: Path) -> Path:
             stderr=subprocess.DEVNULL,
         )
 
-        # Wait up to 15s for FUSE mount to become responsive
         for _ in range(30):
             if os.path.ismount(str(mydrive)):
                 log.info("Kaggle Google Drive mounted successfully.")
@@ -130,13 +161,12 @@ def mount_google_drive(platform: str, mount_point: Path) -> Path:
 
         raise RuntimeError(f"Timed out waiting for rclone mount at {mydrive}")
 
-    # Local fallback
     mount_point.mkdir(parents=True, exist_ok=True)
     return mount_point
 
 
 # ---------------------------------------------------------------------------
-# System Package Installer (Fast No-Op on Warm Containers)
+# System Package Installer
 # ---------------------------------------------------------------------------
 
 
@@ -148,11 +178,22 @@ def ensure_system_packages(packages: list[str]) -> None:
         "rclone": "rclone",
         "unzip": "unzip",
     }
+    lib_checks = {
+        "libvulkan1": "/usr/lib/x86_64-linux-gnu/libvulkan.so.1",
+        "libxi6": "/usr/lib/x86_64-linux-gnu/libXi.so.6",
+        "libxxf86vm1": "/usr/lib/x86_64-linux-gnu/libXxf86vm.so.1",
+        "libxfixes3": "/usr/lib/x86_64-linux-gnu/libXfixes.so.3",
+        "libxrender1": "/usr/lib/x86_64-linux-gnu/libXrender.so.1",
+        "libgl1": "/usr/lib/x86_64-linux-gnu/libGL.so.1",
+        "libxkbcommon0": "/usr/lib/x86_64-linux-gnu/libxkbcommon.so.0",
+        "libsm6": "/usr/lib/x86_64-linux-gnu/libSM.so.6",
+    }
     for pkg in packages:
         bin_name = binary_checks.get(pkg)
         if bin_name and shutil.which(bin_name):
             continue
-        if pkg == "libvulkan1" and Path("/usr/lib/x86_64-linux-gnu/libvulkan.so.1").exists():
+        lib_path = lib_checks.get(pkg)
+        if lib_path and Path(lib_path).exists():
             continue
         missing.append(pkg)
 
@@ -211,7 +252,7 @@ def install_cached_binary(
     if target_dir.exists():
         existing_bins = sorted(target_dir.rglob(executable_glob))
         for candidate in existing_bins:
-            if candidate.is_file() and not candidate.suffix == ".py":
+            if candidate.is_file() and candidate.suffix != ".py":
                 candidate.chmod(0o755)
                 log.info("Using active local %s binary: %s", tool_subdir, candidate)
                 return candidate
@@ -223,6 +264,7 @@ def install_cached_binary(
         local_tmp = Path("/tmp") / archive_name
         _download_with_progress(url, local_tmp)
         log.info("Caching archive to Google Drive: %s", cached_archive)
+        # Use copyfile (not copy2) so Drive FUSE doesn't reject Linux chmod metadata
         shutil.copyfile(local_tmp, cached_archive)
         local_tmp.unlink(missing_ok=True)
     else:
@@ -283,7 +325,6 @@ def inject_godot_addon(repo_dir: Path, project_dir: Path) -> None:
         shutil.rmtree(dest_addon)
     shutil.copytree(src_addon, dest_addon)
 
-    # Enable plugin inside project.godot
     plugin_cfg_res = "res://addons/godot_bake_cloud/plugin.cfg"
     text = project_godot.read_text(encoding="utf-8")
 
@@ -326,12 +367,17 @@ def inject_godot_addon(repo_dir: Path, project_dir: Path) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bootstrap Cloud GPU Render/Bake VM")
-    parser.add_argument("--engine", choices=["blender", "godot", "both"], default="both")
+    parser.add_argument("--engine", choices=["blender", "godot", "both"], default="blender")
+    parser.add_argument(
+        "--blender-version",
+        default=DEFAULT_BLENDER_VERSION,
+        help="Blender release label or version number (e.g. '3.6 LTS (3.6.23)', '4.5', '5.2 LTS (5.2.3)')",
+    )
+    parser.add_argument("--blender-url", default="", help="Optional custom Blender tarball URL override")
+    parser.add_argument("--godot-url", default=DEFAULT_GODOT_URL)
     parser.add_argument("--workspace-name", default="BlendColab_Farm", help="Folder inside MyDrive")
     parser.add_argument("--repo-dir", default=".", help="Path to cloned BlendColab repository")
     parser.add_argument("--godot-project", default="", help="Optional Godot project path to inject addon")
-    parser.add_argument("--blender-url", default=DEFAULT_BLENDER_URL)
-    parser.add_argument("--godot-url", default=DEFAULT_GODOT_URL)
     args = parser.parse_args()
 
     platform = detect_platform()
@@ -342,8 +388,10 @@ def main() -> None:
     for sub in ("cache", "projects", "render_queue", "output"):
         (workspace / sub).mkdir(parents=True, exist_ok=True)
 
-    # Install lightweight OS dependencies
+    # Install lightweight Linux dependencies needed by headless Blender & Godot
     deps = ["ffmpeg"]
+    if args.engine in ("blender", "both"):
+        deps.extend(["libxi6", "libxxf86vm1", "libxfixes3", "libxrender1", "libgl1", "libxkbcommon0", "libsm6"])
     if args.engine in ("godot", "both"):
         deps.extend(["xvfb", "libvulkan1"])
     ensure_system_packages(deps)
@@ -356,13 +404,20 @@ def main() -> None:
     }
 
     if args.engine in ("blender", "both"):
+        if args.blender_url.strip():
+            blender_url = args.blender_url.strip()
+            version_tag = "custom"
+        else:
+            version_tag, blender_url = resolve_blender_url(args.blender_version)
+
         blender_bin = install_cached_binary(
-            url=args.blender_url,
+            url=blender_url,
             cache_dir=cache_dir,
             extract_root=tools_dir,
-            tool_subdir="blender",
+            tool_subdir=f"blender_{version_tag}",
             executable_glob="blender",
         )
+        resolved["blender_version"] = version_tag
         resolved["blender_bin"] = str(blender_bin)
 
     if args.engine in ("godot", "both"):
