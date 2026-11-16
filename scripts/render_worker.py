@@ -767,7 +767,11 @@ def main() -> None:
     parser.add_argument("--discord-webhook", default="", help="Discord webhook URL")
     parser.add_argument("--notify-every", type=int, default=1, help="Send Discord update every N tasks")
     parser.add_argument("--auto-disconnect", action="store_true", help="Disconnect runtime when queue finishes")
-    parser.add_argument("--pool-gpus", action="store_true", help="Pool all GPUs into one process instead of 1 worker per GPU")
+    parser.add_argument(
+        "--pool-gpus",
+        action="store_true",
+        help="Pool all GPUs into one process instead of 1 worker per GPU",
+    )
 
     # Blender options
     parser.add_argument("--blender-bin", default="/content/blender/blender")
