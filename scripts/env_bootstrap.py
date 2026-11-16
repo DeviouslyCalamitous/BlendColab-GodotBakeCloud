@@ -14,6 +14,7 @@ import json
 import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -27,7 +28,7 @@ logging.basicConfig(
 )
 log = logging.getLogger("EnvBootstrap")
 
-# Verified official Linux x64 release tarballs (Blender 3.6 LTS -> 5.3)
+# Official Linux x64 release tarballs (Blender 3.6 LTS -> 5.3)
 BLENDER_VERSIONS: dict[str, str] = {
     "3.6 LTS (3.6.23)": "https://download.blender.org/release/Blender3.6/blender-3.6.23-linux-x64.tar.xz",
     "4.0 (4.0.2)": "https://download.blender.org/release/Blender4.0/blender-4.0.2-linux-x64.tar.xz",
@@ -35,23 +36,40 @@ BLENDER_VERSIONS: dict[str, str] = {
     "4.2 LTS (4.2.8)": "https://download.blender.org/release/Blender4.2/blender-4.2.8-linux-x64.tar.xz",
     "4.3 (4.3.2)": "https://download.blender.org/release/Blender4.3/blender-4.3.2-linux-x64.tar.xz",
     "4.4 (4.4.3)": "https://download.blender.org/release/Blender4.4/blender-4.4.3-linux-x64.tar.xz",
-    "4.5 LTS (4.5.14)": "https://download.blender.org/release/Blender4.5/blender-4.5.14-linux-x64.tar.xz",
+    "4.5 LTS (4.5.16)": "https://download.blender.org/release/Blender4.5/blender-4.5.16-linux-x64.tar.xz",
     "5.0 (5.0.1)": "https://download.blender.org/release/Blender5.0/blender-5.0.1-linux-x64.tar.xz",
-    "5.1 (5.1.2)": "https://download.blender.org/release/Blender5.1/blender-5.1.2-linux-x64.tar.xz",
-    "5.2 LTS (5.2.3)": "https://download.blender.org/release/Blender5.2/blender-5.2.3-linux-x64.tar.xz",
+    "5.1 (5.1.1)": "https://download.blender.org/release/Blender5.1/blender-5.1.1-linux-x64.tar.xz",
+    "5.2 LTS (5.2.4)": "https://download.blender.org/release/Blender5.2/blender-5.2.4-linux-x64.tar.xz",
     "5.3 (5.3.0)": "https://download.blender.org/release/Blender5.3/blender-5.3.0-linux-x64.tar.xz",
 }
 
-DEFAULT_BLENDER_VERSION = "5.2 LTS (5.2.3)"
+DEFAULT_BLENDER_VERSION = "5.2 LTS (5.2.4)"
 DEFAULT_GODOT_URL = (
     "https://github.com/godotengine/godot/releases/download/4.3-stable/"
     "Godot_v4.3-stable_linux.x86_64.zip"
 )
 
 
+def _discover_latest_patch_url(major_minor: str) -> tuple[str, str] | None:
+    """Queries download.blender.org directory index to find the newest patch tarball."""
+    dir_url = f"https://download.blender.org/release/Blender{major_minor}/"
+    try:
+        with urllib.request.urlopen(dir_url, timeout=10) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+        matches = re.findall(
+            rf"blender-({re.escape(major_minor)}\.\d+)-linux-x64\.tar\.xz", html
+        )
+        if matches:
+            latest_tag = sorted(set(matches), key=lambda v: [int(x) for x in v.split(".")])[-1]
+            return latest_tag, f"{dir_url}blender-{latest_tag}-linux-x64.tar.xz"
+    except Exception:
+        pass
+    return None
+
+
 def resolve_blender_url(version_spec: str) -> tuple[str, str]:
     """
-    Resolves a dropdown label (e.g. '5.2 LTS (5.2.3)') or short version ('5.2', '3.6.23')
+    Resolves a dropdown label (e.g. '5.1 (5.1.1)' or '5.1 (5.1.2)') or short version ('5.1')
     into `(version_tag, download_url)`.
     """
     spec = version_spec.strip()
@@ -60,11 +78,17 @@ def resolve_blender_url(version_spec: str) -> tuple[str, str]:
         tag = url.split("blender-")[1].split("-linux")[0]
         return tag, url
 
-    # Match short prefixes like "3.6", "4.5", "5.3", or exact patch "4.2.8"
-    for label, url in BLENDER_VERSIONS.items():
-        if label.startswith(spec) or f"({spec})" in label:
-            tag = url.split("blender-")[1].split("-linux")[0]
-            return tag, url
+    # Match by major.minor prefix (e.g. "5.1" from "5.1 (5.1.2)" or "5.1")
+    mm_match = re.match(r"^(\d+\.\d+)", spec)
+    if mm_match:
+        mm = mm_match.group(1)
+        for label, url in BLENDER_VERSIONS.items():
+            if label.startswith(mm):
+                tag = url.split("blender-")[1].split("-linux")[0]
+                return tag, url
+        discovered = _discover_latest_patch_url(mm)
+        if discovered:
+            return discovered
 
     raise ValueError(
         f"Unsupported Blender version '{version_spec}'. "
@@ -88,17 +112,7 @@ def get_local_tools_dir(platform: str) -> Path:
     return Path.home() / ".cache" / "cloud_farm_tools"
 
 
-# ---------------------------------------------------------------------------
-# Storage Mounting (Colab Native Drive vs. Kaggle rclone FUSE)
-# ---------------------------------------------------------------------------
-
-
 def mount_google_drive(platform: str, mount_point: Path) -> Path:
-    """
-    Mounts Google Drive and returns the root `MyDrive` path.
-    - Colab: Uses `google.colab.drive.mount` (if not already mounted by notebook cell)
-    - Kaggle: Reads `RCLONE_CONF` from Kaggle Secrets (or env) and starts `rclone mount`
-    """
     if platform == "colab":
         mydrive = mount_point / "MyDrive"
         if not mydrive.exists():
@@ -165,11 +179,6 @@ def mount_google_drive(platform: str, mount_point: Path) -> Path:
     return mount_point
 
 
-# ---------------------------------------------------------------------------
-# System Package Installer
-# ---------------------------------------------------------------------------
-
-
 def ensure_system_packages(packages: list[str]) -> None:
     missing: list[str] = []
     binary_checks = {
@@ -208,11 +217,6 @@ def ensure_system_packages(packages: list[str]) -> None:
     )
 
 
-# ---------------------------------------------------------------------------
-# Drive-Cached Binary Installer (Blender & Godot 4)
-# ---------------------------------------------------------------------------
-
-
 def _download_with_progress(url: str, dest: Path) -> None:
     log.info("Downloading %s...", url)
     tmp_download = dest.with_suffix(dest.suffix + ".part")
@@ -241,14 +245,9 @@ def install_cached_binary(
     tool_subdir: str,
     executable_glob: str,
 ) -> Path:
-    """
-    Fetches archive from Google Drive cache (downloading once if absent) and extracts
-    it to fast local NVMe VM storage. Returns the resolved executable Path.
-    """
     cache_dir.mkdir(parents=True, exist_ok=True)
     target_dir = extract_root / tool_subdir
 
-    # Fast-path: already extracted in current VM session
     if target_dir.exists():
         existing_bins = sorted(target_dir.rglob(executable_glob))
         for candidate in existing_bins:
@@ -264,7 +263,6 @@ def install_cached_binary(
         local_tmp = Path("/tmp") / archive_name
         _download_with_progress(url, local_tmp)
         log.info("Caching archive to Google Drive: %s", cached_archive)
-        # Use copyfile (not copy2) so Drive FUSE doesn't reject Linux chmod metadata
         shutil.copyfile(local_tmp, cached_archive)
         local_tmp.unlink(missing_ok=True)
     else:
@@ -301,16 +299,7 @@ def install_cached_binary(
     return bin_path
 
 
-# ---------------------------------------------------------------------------
-# Godot Addon Auto-Injector
-# ---------------------------------------------------------------------------
-
-
 def inject_godot_addon(repo_dir: Path, project_dir: Path) -> None:
-    """
-    Copies `addons/godot_bake_cloud` into the user's Godot 4 project on Drive and
-    registers it in `project.godot` so automated LightmapGI baking works out-of-the-box.
-    """
     src_addon = repo_dir / "godot_addon" / "addons" / "godot_bake_cloud"
     if not src_addon.exists():
         raise FileNotFoundError(f"Addon source missing at {src_addon}")
@@ -360,18 +349,13 @@ def inject_godot_addon(repo_dir: Path, project_dir: Path) -> None:
         log.info("godot_bake_cloud plugin already enabled in %s", project_godot)
 
 
-# ---------------------------------------------------------------------------
-# Entrypoint
-# ---------------------------------------------------------------------------
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Bootstrap Cloud GPU Render/Bake VM")
     parser.add_argument("--engine", choices=["blender", "godot", "both"], default="blender")
     parser.add_argument(
         "--blender-version",
         default=DEFAULT_BLENDER_VERSION,
-        help="Blender release label or version number (e.g. '3.6 LTS (3.6.23)', '4.5', '5.2 LTS (5.2.3)')",
+        help="Blender release label or version number (e.g. '3.6 LTS (3.6.23)', '4.5', '5.1 (5.1.1)')",
     )
     parser.add_argument("--blender-url", default="", help="Optional custom Blender tarball URL override")
     parser.add_argument("--godot-url", default=DEFAULT_GODOT_URL)
@@ -388,7 +372,6 @@ def main() -> None:
     for sub in ("cache", "projects", "render_queue", "output"):
         (workspace / sub).mkdir(parents=True, exist_ok=True)
 
-    # Install lightweight Linux dependencies needed by headless Blender & Godot
     deps = ["ffmpeg"]
     if args.engine in ("blender", "both"):
         deps.extend(["libxi6", "libxxf86vm1", "libxfixes3", "libxrender1", "libgl1", "libxkbcommon0", "libsm6"])
